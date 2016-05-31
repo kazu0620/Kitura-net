@@ -24,41 +24,22 @@ import Socket
 class SocketSelector {
     private let updateQueue = Queue(type: .serial, label: "SocketSelectorUpdate")
     private let selectorQueue = Queue(type: .serial, label: "SocketSelector")
-    private var fakeSocket: Socket?
-    private let pipe = NSPipe()
-    private let outputBuffer: [UInt8] = [0x88]
-    private var inputBuffer: [UInt8] = [0x00]
 
     private var waitingSockets = Dictionary<Int32, (Socket, NSTimeInterval, (Socket) -> Void)>()
 
     init() {
-        let remoteAddress = createFakeRemoteAddress()
-        do {
-            try fakeSocket = Socket.create(fromNativeHandle: pipe.fileHandleForReading.fileDescriptor, address: remoteAddress)
-
-            selectorQueue.queueAsync() {[unowned self] in
-                self.backgroundSelector()
-            }
-        }
-        catch let error as Socket.Error {
-            Log.error("Failed to setup SocketSelector. Error=\(error.description)")
-        } catch {
-            Log.error("Unexpected error...")
+        selectorQueue.queueAsync() {[unowned self] in
+            self.backgroundSelector()
         }
     }
 
     func add(socket: Socket, timeout: NSTimeInterval, callback: (Socket) -> Void) {
         updateQueue.queueAsync() {[unowned self] in
             self.waitingSockets[socket.socketfd] = (socket, timeout+NSDate().timeIntervalSinceReferenceDate, callback)
-            self.pingBackgroundSelector()
         }
     }
 
     private func backgroundSelector() {
-        guard let fakeSocket = fakeSocket else {
-            return
-        }
-
         var okToRun = true
         var sockets = [Socket]()
         var readySockets: [Socket]?
@@ -72,7 +53,6 @@ class SocketSelector {
 
                 let timeNow = NSDate().timeIntervalSinceReferenceDate
             
-                sockets.append(fakeSocket)
                 for (fileDescriptor, info) in self.waitingSockets {
                     let (socket, timeout, _) = info
                     if  timeout < timeNow  {
@@ -86,7 +66,7 @@ class SocketSelector {
             }
 
             do {
-                readySockets = try Socket.wait(for: sockets, timeout: 10000)
+                readySockets = try Socket.wait(for: sockets, timeout: 50)
             }
             catch let error as Socket.Error {
                 Log.error("Failed to setup SocketSelector. Error=\(error.description)")
@@ -99,41 +79,14 @@ class SocketSelector {
     }
 
     private func processReadySockets(_ readySockets: [Socket]?) {
-        guard let readySockets = readySockets,
-                    let fakeSocket = fakeSocket  else { return }
+        guard let readySockets = readySockets  else { return }
 
         for  socket in readySockets {
-            if socket.socketfd == fakeSocket.socketfd {
-                read(pipe.fileHandleForReading.fileDescriptor, UnsafeMutablePointer<UInt8>(inputBuffer), 1)
-            }
-            else {
-                if  let info = waitingSockets[socket.socketfd] {
-                    let (_, _, callback) = info
-                    callback(socket)
-                    waitingSockets.removeValue(forKey: socket.socketfd)
-                }
+            if  let info = waitingSockets[socket.socketfd] {
+                let (_, _, callback) = info
+                callback(socket)
+                waitingSockets.removeValue(forKey: socket.socketfd)
             }
         }
-    }
-
-    private func pingBackgroundSelector() {
-        write(pipe.fileHandleForWriting.fileDescriptor, UnsafeMutablePointer<UInt8>(outputBuffer), 1)
-    }
-
-    private func createFakeRemoteAddress() -> Socket.Address {
-        var socketAddress: sockaddr_in = sockaddr_in()
-        memset(&socketAddress, 0, sizeof(sockaddr_in))
-
-        #if os(OSX)
-            socketAddress.sin_family = UInt8(AF_INET)
-            socketAddress.sin_len = UInt8(sizeof(socketAddress.dynamicType))
-        #else
-            socketAddress.sin_family = UInt16(AF_INET)
-        #endif
-
-        socketAddress.sin_addr.s_addr = inet_addr("127.0.0.1")
-        socketAddress.sin_port = 0
-
-        return Socket.Address.ipv4(socketAddress)
     }
 }
