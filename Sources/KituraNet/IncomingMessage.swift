@@ -87,6 +87,11 @@ public class IncomingMessage : HTTPParserDelegate, SocketReader {
     /// State of incoming message handling
     ///
     private var status = Status.initial
+    
+    ///
+    /// Socket keep alive status
+    ///
+    var isKeepAlive = false
 
     ///
     /// Chunk of body read in by the http_parser, filled by callbacks to onBody
@@ -133,6 +138,7 @@ public class IncomingMessage : HTTPParserDelegate, SocketReader {
     public enum HTTPParserErrorType {
         
         case success
+        case noData
         case parsedLessThanRead
         case unexpectedEOF
         case internalError // TODO
@@ -207,10 +213,10 @@ public class IncomingMessage : HTTPParserDelegate, SocketReader {
                     }
                 }
                 else {
-                    /* Handle unexpected EOF. Usually just close the connection. */
+                    /* Handle unexpected EOF or no data to read */
                     freeHTTPParser()
                     status = .error
-                    callback(.unexpectedEOF)
+                    callback(length < 0 ? .unexpectedEOF : .noData)
                 }
             }
             catch {
@@ -462,6 +468,7 @@ public class IncomingMessage : HTTPParserDelegate, SocketReader {
     func onMessageComplete() {
         
         status = .messageComplete
+        isKeepAlive = httpParser?.isKeepAlive() ?? false
         freeHTTPParser()
         
     }
