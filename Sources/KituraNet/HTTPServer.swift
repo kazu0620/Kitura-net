@@ -17,6 +17,8 @@
 import KituraSys
 import Socket
 
+import Foundation
+
 // MARK: HTTPServer
 
 public class HTTPServer {
@@ -30,6 +32,26 @@ public class HTTPServer {
     /// Queue for handling client requests
     ///
     private static var clientHandlerQueue = Queue(type: .parallel, label: "HTTPServer.clientHandlerQueue")
+    
+    ///
+    /// Socket select manager
+    ///
+    private static var socketSelector = SocketSelector()
+    
+    ///
+    /// Keep alive timeout in seconds
+    ///
+    static let keepAliveTimeout = 10
+    
+    ///
+    /// Keep alive timeout as a NSTimeInterval
+    ///
+    static let keepAliveTimeoutInterval = NSTimeInterval(keepAliveTimeout)
+    
+    ///
+    /// Maximum number of requests handled via keep alive
+    ///
+    static let maximumKeepAliveRequestCount = 10
 
     ///
     /// HTTPServerDelegate
@@ -129,26 +151,28 @@ public class HTTPServer {
         
     }
     
-}
-
-// MARK: HTTPServerSPIDelegate extension
-extension HTTPServer : HTTPServerSPIDelegate {
-
     ///
-    /// Handle a new client HTTP request
+    /// Add a socket to the keep alive handling
     ///
-    /// - Parameter clientSocket: the socket used for connecting
+    /// - Parameter keepAliveSocket: The client socket to be kep alive
     ///
-    func handleClientRequest(socket clientSocket: Socket, fromKeepAlive: Bool) {
-
+    func keepAlive(socket keepAliveSocket: Socket, requestsAllowed: Int) {
+        HTTPServer.socketSelector.add(socket: keepAliveSocket, timeout: HTTPServer.keepAliveTimeoutInterval) {[unowned self] (socket: Socket) in
+            self.clientRequestHandler(socket: socket, fromKeepAlive: true, requestsAllowed: requestsAllowed)
+        }
+    }
+    
+    private func clientRequestHandler(socket clientSocket: Socket, fromKeepAlive: Bool, requestsAllowed: Int) {
+        
         guard let delegate = delegate else {
             return
         }
         
         HTTPServer.clientHandlerQueue.queueAsync() {
-
+            
             let request = ServerRequest(socket: clientSocket)
-            let response = ServerResponse(socket: clientSocket, request: request)
+            request.keepAliveRequests = requestsAllowed
+            let response = ServerResponse(socket: clientSocket, request: request, server: self)
             request.parse() { status in
                 switch status {
                 case .success:
@@ -162,14 +186,38 @@ extension HTTPServer : HTTPServerSPIDelegate {
                     catch {
                         // handle error in connection
                     }
+                case .noData:
+                    clientSocket.close()
                 case .unexpectedEOF:
                     print("UnexpectedEOF")
+                    clientSocket.close()
                 case .internalError:
                     print("InternalError")
+                    clientSocket.close()
                 }
             }
-
+            
         }
+    }
+    
+}
+
+// MARK: HTTPServerSPIDelegate extension
+extension HTTPServer : HTTPServerSPIDelegate {
+
+    ///
+    /// Handle a new client HTTP request
+    ///
+    /// - Parameter clientSocket: the socket used for connecting
+    ///
+    func handleClientRequest(socket clientSocket: Socket) {
+        do {
+            try clientSocket.setBlocking(mode: true)
+        }
+        catch { /* Ignore set blocking failure */ }
+        
+        clientRequestHandler(socket: clientSocket, fromKeepAlive: false, requestsAllowed: HTTPServer.maximumKeepAliveRequestCount)
+        
     }
 }
 
