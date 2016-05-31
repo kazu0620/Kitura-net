@@ -26,6 +26,11 @@ public class ServerRequest: IncomingMessage {
     /// Socket for the request
     ///
     private let socket: Socket
+    
+    ///
+    /// Maximum number of requests for keep alive
+    ///
+    var keepAliveRequests = HTTPServer.maximumKeepAliveRequestCount
 
     ///
     /// server IP address pulled from socket
