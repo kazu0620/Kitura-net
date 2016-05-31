@@ -44,7 +44,7 @@ class HTTPServerSPI {
                 return
             }
 
-            try socket.listen(on: port)
+            try socket.listen(on: port, maxPendingConnections: HTTPServer.maxPendingConnections)
             Log.info("Listening on port \(port)")
 
             // TODO: Change server exit to not rely on error being thrown

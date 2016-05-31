@@ -34,6 +34,11 @@ public class HTTPServer {
     private static var clientHandlerQueue = Queue(type: .parallel, label: "HTTPServer.clientHandlerQueue")
     
     ///
+    /// Maximum number of pending sockets
+    ///
+    static let maxPendingConnections = 20
+    
+    ///
     /// Socket select manager
     ///
     private static var socketSelector = SocketSelector()
