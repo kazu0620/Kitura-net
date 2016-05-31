@@ -57,6 +57,11 @@ public class ServerResponse : SocketWriter {
     /// Corresponding server request
     ///
     private weak var serverRequest : ServerRequest?
+    
+    ///
+    /// Our server object
+    ///
+    private weak var server: HTTPServer?
 
     ///
     /// Status code
@@ -75,10 +80,11 @@ public class ServerResponse : SocketWriter {
     ///
     /// Initializes a ServerResponse instance
     ///
-    init(socket: Socket, request: ServerRequest) {
+    init(socket: Socket, request: ServerRequest, server: HTTPServer) {
 
         self.socket = socket
         serverRequest = request
+        self.server = server
         buffer = NSMutableData(capacity: ServerResponse.bufferSize)!
         headers["Date"] = [SPIUtils.httpDate()]
     }
@@ -152,9 +158,18 @@ public class ServerResponse : SocketWriter {
             if  buffer.length > 0  {
                 try socket.write(from: buffer)
             }
-            socket.close()
+            // If we still have a server and request object and keep alive was request,
+            // then spawn off a new request handler.
+            if  let server = server,
+                let keepAlive = serverRequest?.isKeepAlive,
+                let keepAliveRequests = serverRequest?.keepAliveRequests  where keepAlive  &&  keepAliveRequests > 1 {
+                server.keepAlive(socket: socket, requestsAllowed: keepAliveRequests-1)
+            }
+            else {
+                socket.close()
+                self.socket = nil
+            }
         }
-        socket = nil
     }
 
     ///
@@ -187,6 +202,18 @@ public class ServerResponse : SocketWriter {
                 try writeToSocketThroughBuffer(text: value)
                 try writeToSocketThroughBuffer(text: "\r\n")
             }
+        }
+        
+        // If we still have a request object and keep alive was requested and
+        // the number of requests handled is less than the maximum
+        if  let keepAlive = serverRequest?.isKeepAlive,
+            let keepAliveRequests = serverRequest?.keepAliveRequests
+            where keepAlive  &&  keepAliveRequests > 1 {
+            try writeToSocketThroughBuffer(text: "Connection: Keep-Alive\r\n")
+            try writeToSocketThroughBuffer(text: "Keep-Alive: timeout=\(HTTPServer.keepAliveTimeout), max=\(keepAliveRequests-1)\r\n")
+        }
+        else {
+            try writeToSocketThroughBuffer(text: "Connection: Close\r\n")
         }
 
         try writeToSocketThroughBuffer(text: "\r\n")
