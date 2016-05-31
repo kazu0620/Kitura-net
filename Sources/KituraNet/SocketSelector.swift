@@ -48,7 +48,7 @@ class SocketSelector {
     }
 
     func add(socket: Socket, timeout: NSTimeInterval, callback: (Socket) -> Void) {
-        updateQueue.queueSync() {[unowned self] in
+        updateQueue.queueAsync() {[unowned self] in
             self.waitingSockets[socket.socketfd] = (socket, timeout+NSDate().timeIntervalSinceReferenceDate, callback)
             self.pingBackgroundSelector()
         }
