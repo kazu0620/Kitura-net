@@ -183,24 +183,25 @@ public class ServerResponse : SocketWriter {
             return
         }
 
-        try writeToSocketThroughBuffer(text: "HTTP/1.1 ")
-        try writeToSocketThroughBuffer(text: String(status))
-        try writeToSocketThroughBuffer(text: " ")
+        var headerData = ""
+        headerData.append("HTTP/1.1 ")
+        headerData.append(String(status))
+        headerData.append(" ")
         var statusText = HTTP.statusCodes[status]
 
         if  statusText == nil {
             statusText = ""
         }
 
-        try writeToSocketThroughBuffer(text: statusText!)
-        try writeToSocketThroughBuffer(text: "\r\n")
+        headerData.append(statusText!)
+        headerData.append("\r\n")
 
         for (key, valueSet) in headers.headers {
             for value in valueSet {
-                try writeToSocketThroughBuffer(text: key)
-                try writeToSocketThroughBuffer(text: ": ")
-                try writeToSocketThroughBuffer(text: value)
-                try writeToSocketThroughBuffer(text: "\r\n")
+                headerData.append(key)
+                headerData.append(": ")
+                headerData.append(value)
+                headerData.append("\r\n")
             }
         }
         
@@ -209,14 +210,15 @@ public class ServerResponse : SocketWriter {
         if  let keepAlive = serverRequest?.isKeepAlive,
             let keepAliveRequests = serverRequest?.keepAliveRequests
             where keepAlive  &&  keepAliveRequests > 1 {
-            try writeToSocketThroughBuffer(text: "Connection: Keep-Alive\r\n")
-            try writeToSocketThroughBuffer(text: "Keep-Alive: timeout=\(HTTPServer.keepAliveTimeout), max=\(keepAliveRequests-1)\r\n")
+            headerData.append("Connection: Keep-Alive\r\n")
+            headerData.append("Keep-Alive: timeout=\(HTTPServer.keepAliveTimeout), max=\(keepAliveRequests-1)\r\n")
         }
         else {
-            try writeToSocketThroughBuffer(text: "Connection: Close\r\n")
+            headerData.append("Connection: Close\r\n")
         }
 
-        try writeToSocketThroughBuffer(text: "\r\n")
+        headerData.append("\r\n")
+        try writeToSocketThroughBuffer(text: headerData)
         startFlushed = true
     }
 
