@@ -15,6 +15,7 @@
  **/
 
 import KituraSys
+import LoggerAPI
 import Socket
 
 import Foundation
@@ -63,18 +64,10 @@ public class HTTPServer {
     ///
     public weak var delegate: HTTPServerDelegate?
     
-    ///
-    /// HTTP service provider interface
-    ///
-    private let spi: HTTPServerSPI
-    
     /// 
     /// Port number for listening for new connections
     ///
-    private var _port: Int?
-    public var port: Int? {
-        get { return _port }
-    }
+    public private(set) var port: Int?
     
     /// 
     /// TCP socket used for listening for new connections
@@ -82,16 +75,9 @@ public class HTTPServer {
     private var listenSocket: Socket?
     
     ///
-    /// Initializes an HTTPServer instance
+    /// Whether the HTTP server has stopped listening
     ///
-    /// - Returns: an HTTPServer instance
-    ///
-    public init() {
-        
-        spi = HTTPServerSPI()
-        spi.delegate = self
-        
-    }
+    var stopped = false
 
     ///
     /// Listens for connections on a socket
@@ -101,7 +87,7 @@ public class HTTPServer {
     ///
     public func listen(port: Int, notOnMainQueue: Bool=false) {
         
-        self._port = port
+        self.port = port
 		
 		do {
             
@@ -114,14 +100,14 @@ public class HTTPServer {
 		}
 
 		let queuedBlock = {
-			self.spi.spiListen(socket: self.listenSocket, port: self._port!)
+			self.listen(socket: self.listenSocket, port: self.port!)
 		}
 		
 		if notOnMainQueue {
-			HTTPServer.listenerQueue.queueAsync(queuedBlock)
+			HTTPServer.listenerQueue.enqueueAsynchronously(queuedBlock)
 		}
 		else {
-			Queue.queueIfFirstOnMain(queue: HTTPServer.listenerQueue, block: queuedBlock)
+			Queue.enqueueIfFirstOnMain(queue: HTTPServer.listenerQueue, block: queuedBlock)
 		}
         
     }
@@ -132,7 +118,7 @@ public class HTTPServer {
     public func stop() {
         
         if let listenSocket = listenSocket {
-            spi.stopped = true
+            stopped = true
             listenSocket.close()
         }
         
@@ -157,6 +143,42 @@ public class HTTPServer {
     }
     
     ///
+    /// Handles instructions for listening on a socket
+    ///
+    /// - Parameter socket: socket to use for connecting
+    /// - Parameter port: number to listen on
+    ///
+    func listen(socket: Socket?, port: Int) {
+        
+        do {
+            guard let socket = socket else {
+                return
+            }
+            
+            try socket.listen(on: port)
+            Log.info("Listening on port \(port)")
+            
+            // TODO: Change server exit to not rely on error being thrown
+            repeat {
+                let clientSocket = try socket.acceptClientConnection()
+                Log.info("Accepted connection from: " +
+                    "\(clientSocket.remoteHostname):\(clientSocket.remotePort)")
+                handleClientRequest(socket: clientSocket)
+            } while true
+        } catch let error as Socket.Error {
+            
+            if stopped && error.errorCode == Int32(Socket.SOCKET_ERR_ACCEPT_FAILED) {
+                Log.info("Server has stopped listening")
+            }
+            else {
+                Log.error("Error reported:\n \(error.description)")
+            }
+        } catch {
+            Log.error("Unexpected error...")
+        }
+    }
+    
+    ///
     /// Add a socket to the keep alive handling
     ///
     /// - Parameter keepAliveSocket: The client socket to be kep alive
@@ -165,6 +187,22 @@ public class HTTPServer {
         HTTPServer.socketSelector.wait(socket: keepAliveSocket, timeout: HTTPServer.keepAliveTimeoutInterval) {[unowned self] (socket: Socket) in
             self.clientRequestHandler(socket: socket, fromKeepAlive: true, requestsAllowed: requestsAllowed)
         }
+    }
+
+    ///
+    /// Handle a new client HTTP request
+    ///
+    /// - Parameter clientSocket: the socket used for connecting
+    ///
+    func handleClientRequest(socket clientSocket: Socket) {
+        do {
+            try clientSocket.setBlocking(mode: true)
+        }
+        catch { /* Ignore set blocking failure */ }
+        
+        HTTPServer.socketSelector.add(socket: clientSocket)
+        
+        clientRequestHandler(socket: clientSocket, fromKeepAlive: false, requestsAllowed: HTTPServer.maximumKeepAliveRequestCount)
     }
 
     ///
@@ -182,8 +220,8 @@ public class HTTPServer {
             return
         }
         
-        HTTPServer.clientHandlerQueue.queueAsync() {
-            
+        HTTPServer.clientHandlerQueue.enqueueAsynchronously() {
+
             let request = ServerRequest(socket: clientSocket)
             request.keepAliveRequests = requestsAllowed
             let response = ServerResponse(socket: clientSocket, request: request, server: self)
@@ -216,26 +254,6 @@ public class HTTPServer {
     
 }
 
-// MARK: HTTPServerSPIDelegate extension
-extension HTTPServer : HTTPServerSPIDelegate {
-
-    ///
-    /// Handle a new client HTTP request
-    ///
-    /// - Parameter clientSocket: the socket used for connecting
-    ///
-    func handleClientRequest(socket clientSocket: Socket) {
-        do {
-            try clientSocket.setBlocking(mode: true)
-        }
-        catch { /* Ignore set blocking failure */ }
-        
-        HTTPServer.socketSelector.add(socket: clientSocket)
-        
-        clientRequestHandler(socket: clientSocket, fromKeepAlive: false, requestsAllowed: HTTPServer.maximumKeepAliveRequestCount)
-        
-    }
-}
 
 ///
 /// Delegate protocol for an HTTPServer
