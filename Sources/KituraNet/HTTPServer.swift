@@ -162,9 +162,18 @@ public class HTTPServer {
     /// - Parameter keepAliveSocket: The client socket to be kep alive
     ///
     func keepAlive(socket keepAliveSocket: Socket, requestsAllowed: Int) {
-        HTTPServer.socketSelector.add(socket: keepAliveSocket, timeout: HTTPServer.keepAliveTimeoutInterval) {[unowned self] (socket: Socket) in
+        HTTPServer.socketSelector.wait(socket: keepAliveSocket, timeout: HTTPServer.keepAliveTimeoutInterval) {[unowned self] (socket: Socket) in
             self.clientRequestHandler(socket: socket, fromKeepAlive: true, requestsAllowed: requestsAllowed)
         }
+    }
+
+    ///
+    /// Remove a socket from the SocketSelector
+    ///
+    /// - Parameter socket: The socket to remove
+    ///
+    func remove(socket: Socket) {
+        HTTPServer.socketSelector.remove(fileDescriptor: socket.socketfd)
     }
     
     private func clientRequestHandler(socket clientSocket: Socket, fromKeepAlive: Bool, requestsAllowed: Int) {
@@ -191,10 +200,13 @@ public class HTTPServer {
                         // handle error in connection
                     }
                 case .noData:
+                    HTTPServer.socketSelector.remove(fileDescriptor: clientSocket.socketfd)
                     clientSocket.close()
                 case .unexpectedEOF:
+                    HTTPServer.socketSelector.remove(fileDescriptor: clientSocket.socketfd)
                     clientSocket.close()
                 case .internalError:
+                    HTTPServer.socketSelector.remove(fileDescriptor: clientSocket.socketfd)
                     clientSocket.close()
                 }
             }
@@ -217,6 +229,8 @@ extension HTTPServer : HTTPServerSPIDelegate {
             try clientSocket.setBlocking(mode: true)
         }
         catch { /* Ignore set blocking failure */ }
+        
+        HTTPServer.socketSelector.add(socket: clientSocket)
         
         clientRequestHandler(socket: clientSocket, fromKeepAlive: false, requestsAllowed: HTTPServer.maximumKeepAliveRequestCount)
         

@@ -15,78 +15,135 @@
  **/
 
 import Foundation
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 import LoggerAPI
 import KituraSys
+import CSelectUtilities
 
 import Socket
 
 class SocketSelector {
-    private let updateQueue = Queue(type: .serial, label: "SocketSelectorUpdate")
+    private let selectTimeout = 50  // In milliseconds
+    
     private let selectorQueue = Queue(type: .serial, label: "SocketSelector")
 
-    private var waitingSockets = Dictionary<Int32, (Socket, NSTimeInterval, (Socket) -> Void)>()
+    private var waitingSockets = [SocketSelectorData]()
 
     init() {
+        let fileDescriptorSetSize = getFileDescriptorSetSize()
+        for _ in 0 ..< fileDescriptorSetSize {
+            waitingSockets.append(SocketSelectorData())
+        }
         selectorQueue.queueAsync() {[unowned self] in
             self.backgroundSelector()
         }
     }
-
-    func add(socket: Socket, timeout: NSTimeInterval, callback: (Socket) -> Void) {
-        updateQueue.queueAsync() {[unowned self] in
-            self.waitingSockets[socket.socketfd] = (socket, timeout+NSDate().timeIntervalSinceReferenceDate, callback)
+    
+    func add(socket: Socket) {
+        let fileDescriptor = socket.socketfd
+        if  fileDescriptor > 0 {
+            waitingSockets[Int(socket.socketfd)].socket = socket
         }
+    }
+
+    func wait(socket: Socket, timeout: NSTimeInterval, callback: (Socket) -> Void) {
+        let fileDescriptor = socket.socketfd
+        if  fileDescriptor > 0  {
+            let info = self.waitingSockets[Int(fileDescriptor)]
+            info.timeout = timeout
+            info.callback = callback
+        }
+    }
+    
+    func remove(fileDescriptor: Int32) {
+	    if  fileDescriptor > 0  {
+            waitingSockets[Int(fileDescriptor)].socket = nil
+	    }
     }
 
     private func backgroundSelector() {
         var okToRun = true
-        var sockets = [Socket]()
-        var readySockets: [Socket]?
+        var fileDescriptorSet = fd_set()
 
         while okToRun {
-            sockets = []
             
-            updateQueue.queueSync() {[unowned self] in
-
-                self.processReadySockets(readySockets)
-
-                let timeNow = NSDate().timeIntervalSinceReferenceDate
+            // Setup the timeout...
+            var timer = timeval()
             
-                for (fileDescriptor, info) in self.waitingSockets {
-                    let (socket, timeout, _) = info
-                    if  timeout < timeNow  {
-                        socket.close()
-                        self.waitingSockets.removeValue(forKey: fileDescriptor)
-                    }
-                    else {
-                        sockets.append(socket)
-                    }
+            #if os(Linux)
+                timer.tv_usec = Int(selectTimeout * 1000)
+            #else
+                timer.tv_usec = Int32(selectTimeout * 1000)
+            #endif
+            
+            var maximumFileDescriptor: Int32 = 0
+            zeroFileDescriptorSet(&fileDescriptorSet)
+            
+            for index in 0 ..< waitingSockets.count  {
+                let info = waitingSockets[index]
+                if  info.socket != nil  &&  info.socket != nil  {
+                    maximumFileDescriptor = Int32(index)
+                    setFileDescriptorBit(maximumFileDescriptor, &fileDescriptorSet)
                 }
             }
-
-            do {
-                readySockets = try Socket.wait(for: sockets, timeout: 50)
+            
+            let count = select(maximumFileDescriptor+1, &fileDescriptorSet, nil, nil, &timer)
+            
+            if  count < 0  {
+                Log.error(String(validatingUTF8: strerror(errno)) ?? "Error: \(errno)")
+                okToRun = false
             }
-            catch let error as Socket.Error {
-                Log.error("Failed to setup SocketSelector. Error=\(error.description)")
-                okToRun = false
-            } catch {
-                Log.error("Unexpected error...")
-                okToRun = false
+            else if  count > 0 {
+                // Some file descriptors are ready to be read from
+                processReadySockets(count: Int(count), maximumFileDescriptor: maximumFileDescriptor, fileDescriptorSet: &fileDescriptorSet)
+            }
+            else {
+                removeTimedoutSockets(maximumFileDescriptor: maximumFileDescriptor)
             }
         }
     }
+    
+    private func processReadySockets(count: Int, maximumFileDescriptor: Int32, fileDescriptorSet: inout fd_set) {
+        var localMaximumFileDescriptor = maximumFileDescriptor
+        var localCount = count
+        while localCount > 0  &&  localMaximumFileDescriptor > 0  {
+            if  isFileDescriptorBitSet(localMaximumFileDescriptor, &fileDescriptorSet) == 1  {
+                localCount -= 1
+                let info = waitingSockets[Int(localMaximumFileDescriptor)]
+                if  let callback = info.callback,
+                      let socket = info.socket  {
+                    callback(socket)
+                }
+                info.callback = nil
+            }
+            localMaximumFileDescriptor -= 1
+        }
+        
+        removeTimedoutSockets(maximumFileDescriptor: maximumFileDescriptor)
+    }
+    
+    private func removeTimedoutSockets(maximumFileDescriptor: Int32) {
+        let timeNow = NSDate().timeIntervalSinceReferenceDate
 
-    private func processReadySockets(_ readySockets: [Socket]?) {
-        guard let readySockets = readySockets  else { return }
-
-        for  socket in readySockets {
-            if  let info = waitingSockets[socket.socketfd] {
-                let (_, _, callback) = info
-                callback(socket)
-                waitingSockets.removeValue(forKey: socket.socketfd)
+        for  index in 0 ..< Int(maximumFileDescriptor)  {
+            let info = self.waitingSockets[index]
+            if  let socket = info.socket  where  info.timeout < timeNow  {
+                socket.close()
+                info.socket = nil
+                info.callback = nil
             }
         }
     }
+    
+    private class SocketSelectorData {
+        private var socket: Socket?
+        private var timeout: NSTimeInterval = 0.0
+        private var callback: ((Socket) -> Void)?
+    }
+    
 }

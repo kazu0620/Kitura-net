@@ -166,6 +166,7 @@ public class ServerResponse : SocketWriter {
                 server.keepAlive(socket: socket, requestsAllowed: keepAliveRequests-1)
             }
             else {
+		        server?.remove(socket: socket)
                 socket.close()
                 self.socket = nil
             }
