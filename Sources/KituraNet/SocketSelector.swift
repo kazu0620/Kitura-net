@@ -34,20 +34,26 @@ class SocketSelector {
 
     private var waitingSockets = [SocketSelectorData]()
 
+    private var maximumEverFileDescriptor = 0
+
     init() {
         let fileDescriptorSetSize = getFileDescriptorSetSize()
         for _ in 0 ..< fileDescriptorSetSize {
             waitingSockets.append(SocketSelectorData())
         }
-        selectorQueue.queueAsync() {[unowned self] in
+        selectorQueue.enqueueAsynchronously() {[unowned self] in
             self.backgroundSelector()
         }
     }
     
     func add(socket: Socket) {
-        let fileDescriptor = socket.socketfd
+        let fileDescriptor = Int(socket.socketfd)
         if  fileDescriptor > 0 {
-            waitingSockets[Int(socket.socketfd)].socket = socket
+            waitingSockets[fileDescriptor].socket = socket
+
+            if  fileDescriptor > maximumEverFileDescriptor  {
+                maximumEverFileDescriptor = fileDescriptor
+            }
         }
     }
 
@@ -84,7 +90,7 @@ class SocketSelector {
             var maximumFileDescriptor: Int32 = 0
             zeroFileDescriptorSet(&fileDescriptorSet)
             
-            for index in 0 ..< waitingSockets.count  {
+            for index in 0 ... maximumEverFileDescriptor  {
                 let info = waitingSockets[index]
                 if  info.socket != nil  &&  info.socket != nil  {
                     maximumFileDescriptor = Int32(index)
@@ -94,15 +100,17 @@ class SocketSelector {
             
             let count = select(maximumFileDescriptor+1, &fileDescriptorSet, nil, nil, &timer)
             
-            if  count < 0  {
+            if  count < 0  &&  errno != EBADF  {
                 Log.error(String(validatingUTF8: strerror(errno)) ?? "Error: \(errno)")
+                print(String(validatingUTF8: strerror(errno)) ?? "Error: \(errno)")
+		        print("Errno=\(errno)")
                 okToRun = false
             }
             else if  count > 0 {
                 // Some file descriptors are ready to be read from
                 processReadySockets(count: Int(count), maximumFileDescriptor: maximumFileDescriptor, fileDescriptorSet: &fileDescriptorSet)
             }
-            else {
+            else {  // Either the select timed out or we received an error of a Bad File descriptor, which we ignore....
                 removeTimedoutSockets(maximumFileDescriptor: maximumFileDescriptor)
             }
         }
