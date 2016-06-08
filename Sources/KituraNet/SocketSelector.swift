@@ -28,48 +28,33 @@ import CSelectUtilities
 import Socket
 
 class SocketSelector {
+    
+    weak var delegate: SocketSelectorDelegate?
+    
     private let selectTimeout = 50  // In milliseconds
     
     private let selectorQueue = Queue(type: .serial, label: "SocketSelector")
 
-    private var waitingSockets = [SocketSelectorData]()
+    private var fileDescriptorTimeouts: [NSTimeInterval]
 
     private var maximumEverFileDescriptor = 0
 
     init() {
-        let fileDescriptorSetSize = getFileDescriptorSetSize()
-        for _ in 0 ..< fileDescriptorSetSize {
-            waitingSockets.append(SocketSelectorData())
-        }
+        let fileDescriptorSetSize = Int(getFileDescriptorSetSize())
+        fileDescriptorTimeouts = [NSTimeInterval](repeating: 0.0, count: fileDescriptorSetSize)
+        
         selectorQueue.enqueueAsynchronously() {[unowned self] in
             self.backgroundSelector()
         }
     }
-    
-    func add(socket: Socket) {
-        let fileDescriptor = Int(socket.socketfd)
-        if  fileDescriptor > 0 {
-            waitingSockets[fileDescriptor].socket = socket
 
+    func wait(fileDescriptor: Int, timeout: NSTimeInterval) {
+        if  fileDescriptor > 0  {
+            fileDescriptorTimeouts[fileDescriptor] = timeout
             if  fileDescriptor > maximumEverFileDescriptor  {
                 maximumEverFileDescriptor = fileDescriptor
             }
         }
-    }
-
-    func wait(socket: Socket, timeout: NSTimeInterval, callback: (Socket) -> Void) {
-        let fileDescriptor = socket.socketfd
-        if  fileDescriptor > 0  {
-            let info = self.waitingSockets[Int(fileDescriptor)]
-            info.timeout = timeout
-            info.callback = callback
-        }
-    }
-    
-    func remove(fileDescriptor: Int32) {
-	    if  fileDescriptor > 0  {
-            waitingSockets[Int(fileDescriptor)].socket = nil
-	    }
     }
 
     private func backgroundSelector() {
@@ -91,8 +76,7 @@ class SocketSelector {
             zeroFileDescriptorSet(&fileDescriptorSet)
             
             for index in 0 ... maximumEverFileDescriptor  {
-                let info = waitingSockets[index]
-                if  info.socket != nil  &&  info.socket != nil  {
+                if  fileDescriptorTimeouts[index] > 0.0  {
                     maximumFileDescriptor = Int32(index)
                     setFileDescriptorBit(maximumFileDescriptor, &fileDescriptorSet)
                 }
@@ -122,12 +106,11 @@ class SocketSelector {
         while localCount > 0  &&  localMaximumFileDescriptor > 0  {
             if  isFileDescriptorBitSet(localMaximumFileDescriptor, &fileDescriptorSet) == 1  {
                 localCount -= 1
-                let info = waitingSockets[Int(localMaximumFileDescriptor)]
-                if  let callback = info.callback,
-                      let socket = info.socket  {
-                    callback(socket)
+                let fileDescriptor = Int(localMaximumFileDescriptor)
+                if  fileDescriptorTimeouts[fileDescriptor] > 0.0  {
+                    delegate?.readFrom(fileDescriptor: fileDescriptor)
+                    fileDescriptorTimeouts[fileDescriptor] = 0.0
                 }
-                info.callback = nil
             }
             localMaximumFileDescriptor -= 1
         }
@@ -139,19 +122,10 @@ class SocketSelector {
         let timeNow = NSDate().timeIntervalSinceReferenceDate
 
         for  index in 0 ..< Int(maximumFileDescriptor)  {
-            let info = self.waitingSockets[index]
-            if  let socket = info.socket  where  info.timeout < timeNow  {
-                socket.close()
-                info.socket = nil
-                info.callback = nil
+            let timeout = fileDescriptorTimeouts[index]
+            if  timeout < timeNow  {
+                close(Int32(index))
             }
         }
     }
-    
-    private class SocketSelectorData {
-        private var socket: Socket?
-        private var timeout: NSTimeInterval = 0.0
-        private var callback: ((Socket) -> Void)?
-    }
-    
 }

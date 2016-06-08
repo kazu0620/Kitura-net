@@ -14,6 +14,7 @@
  * limitations under the License.
  **/
 
+import CSelectUtilities
 import KituraSys
 import LoggerAPI
 import Socket
@@ -42,17 +43,12 @@ public class HTTPServer {
     ///
     /// Socket select manager
     ///
-    private static var socketSelector = SocketSelector()
+    private var socketSelector = SocketSelector()
     
     ///
     /// Keep alive timeout in seconds
     ///
-    static let keepAliveTimeout = 10
-    
-    ///
-    /// Keep alive timeout as a NSTimeInterval
-    ///
-    static let keepAliveTimeoutInterval = NSTimeInterval(keepAliveTimeout)
+    static let keepAliveTimeout: NSTimeInterval = 10
     
     ///
     /// Maximum number of requests handled via keep alive
@@ -78,6 +74,24 @@ public class HTTPServer {
     /// Whether the HTTP server has stopped listening
     ///
     var stopped = false
+    
+    ///
+    /// Open sockets
+    ///
+    var openSockets = [Socket?]()
+    
+    ///
+    /// Number of requests left that can be made on a "socket"
+    ///
+    var requestsLeft = [Int]()
+    
+    init() {
+        let fileDescriptorSetSize = Int(getFileDescriptorSetSize())
+        openSockets = [Socket?](repeating: nil, count: fileDescriptorSetSize)
+        requestsLeft = [Int](repeating: 0, count: fileDescriptorSetSize)
+        
+        socketSelector.delegate = self
+    }
 
     ///
     /// Listens for connections on a socket
@@ -169,12 +183,15 @@ public class HTTPServer {
             
             if stopped && error.errorCode == Int32(Socket.SOCKET_ERR_ACCEPT_FAILED) {
                 Log.info("Server has stopped listening")
+                print("Server has stopped listening")
             }
             else {
                 Log.error("Error reported:\n \(error.description)")
+                print("Error reported:\n \(error.description)")
             }
         } catch {
             Log.error("Unexpected error...")
+            print("Unexpected error...")
         }
     }
     
@@ -184,9 +201,14 @@ public class HTTPServer {
     /// - Parameter keepAliveSocket: The client socket to be kep alive
     ///
     func keepAlive(socket keepAliveSocket: Socket, requestsAllowed: Int) {
-        HTTPServer.socketSelector.wait(socket: keepAliveSocket, timeout: HTTPServer.keepAliveTimeoutInterval) {[unowned self] (socket: Socket) in
-            self.clientRequestHandler(socket: socket, fromKeepAlive: true, requestsAllowed: requestsAllowed)
-        }
+        let fileDescriptor = Int(keepAliveSocket.socketfd)
+        
+//print("about to set requestsLeft[\(fileDescriptor)]")
+        requestsLeft[fileDescriptor] = requestsAllowed
+//print("set requestsLeft[\(fileDescriptor)]")
+        
+        let timeout = NSDate().addingTimeInterval(HTTPServer.keepAliveTimeout).timeIntervalSinceReferenceDate
+        socketSelector.wait(fileDescriptor: Int(keepAliveSocket.socketfd), timeout: timeout)
     }
 
     ///
@@ -200,19 +222,14 @@ public class HTTPServer {
         }
         catch { /* Ignore set blocking failure */ }
         
-        HTTPServer.socketSelector.add(socket: clientSocket)
+//print("about to set openSockets[\(clientSocket.socketfd)]")
+        openSockets[Int(clientSocket.socketfd)] = clientSocket
+//print("set openSockets[\(clientSocket.socketfd)]")
+        print("handleClientRequest: new client socket")
         
         clientRequestHandler(socket: clientSocket, fromKeepAlive: false, requestsAllowed: HTTPServer.maximumKeepAliveRequestCount)
     }
 
-    ///
-    /// Remove a socket from the SocketSelector
-    ///
-    /// - Parameter socket: The socket to remove
-    ///
-    func remove(socket: Socket) {
-        HTTPServer.socketSelector.remove(fileDescriptor: socket.socketfd)
-    }
     
     private func clientRequestHandler(socket clientSocket: Socket, fromKeepAlive: Bool, requestsAllowed: Int) {
         
@@ -220,8 +237,8 @@ public class HTTPServer {
             return
         }
         
-        HTTPServer.clientHandlerQueue.enqueueAsynchronously() {
-
+        HTTPServer.clientHandlerQueue.enqueueAsynchronously() { [unowned self] in
+            
             let request = ServerRequest(socket: clientSocket)
             request.keepAliveRequests = requestsAllowed
             let response = ServerResponse(socket: clientSocket, request: request, server: self)
@@ -238,13 +255,13 @@ public class HTTPServer {
                         // handle error in connection
                     }
                 case .noData:
-                    HTTPServer.socketSelector.remove(fileDescriptor: clientSocket.socketfd)
+                    print("No data")
                     clientSocket.close()
                 case .unexpectedEOF:
-                    HTTPServer.socketSelector.remove(fileDescriptor: clientSocket.socketfd)
+                    print("Unexpected EOF")
                     clientSocket.close()
                 case .internalError:
-                    HTTPServer.socketSelector.remove(fileDescriptor: clientSocket.socketfd)
+                    print("Internal error")
                     clientSocket.close()
                 }
             }
@@ -252,6 +269,17 @@ public class HTTPServer {
         }
     }
     
+}
+
+extension HTTPServer: SocketSelectorDelegate {
+    func readFrom(fileDescriptor: Int) {
+        guard  fileDescriptor > 0  else { return }
+//print("about to reference openSockets[\(fileDescriptor)]")
+        guard  let socket = openSockets[fileDescriptor]  where socket.socketfd > 0  else { return }
+//print("referenced openSockets[\(fileDescriptor)]")
+print("readFrom: about to call handler...")
+        clientRequestHandler(socket: socket, fromKeepAlive: true, requestsAllowed: requestsLeft[fileDescriptor])
+    }
 }
 
 
